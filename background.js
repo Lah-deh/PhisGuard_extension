@@ -13,12 +13,12 @@ function normalizeUrl(url) {
   }
 }
 
-// Runs before navigation actually starts
-chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
-  if (details.frameId !== 0) return; // Only main frame
-  if (!details.tabId || details.tabId < 0) return;
+// Shared function to check a URL before loading
+async function checkAndHandleNavigation(tabId, frameId, url) {
+  if (frameId !== 0) return; // Only main frame
+  if (!tabId || tabId < 0) return;
 
-  const currentUrl = normalizeUrl(details.url);
+  const currentUrl = normalizeUrl(url);
 
   // Skip special pages
   if (
@@ -33,19 +33,15 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     return;
   }
 
-  // If allowed already, skip
-  if (allowedUrlsPerTab[details.tabId] === currentUrl) return;
-
-  // If already checked in this tab, skip
-  if (checkedUrlsPerTab[details.tabId] === currentUrl) return;
+  // Skip if allowed or already checked
+  if (allowedUrlsPerTab[tabId] === currentUrl) return;
+  if (checkedUrlsPerTab[tabId] === currentUrl) return;
 
   // Save the original target URL
-  originalUrlPerTab[details.tabId] = currentUrl;
+  originalUrlPerTab[tabId] = currentUrl;
 
-  // Immediately show a blank page
-  chrome.tabs.update(details.tabId, {
-    url: chrome.runtime.getURL("blank.html")
-  });
+  // Show blank page immediately
+  chrome.tabs.update(tabId, { url: chrome.runtime.getURL("blank.html") });
 
   try {
     const response = await fetch("https://phishguard-api-0nyx.onrender.com/predict", {
@@ -56,28 +52,38 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 
     if (!response.ok) {
       console.warn(`PhishGuard API returned ${response.status}, allowing:`, currentUrl);
-      chrome.tabs.update(details.tabId, { url: currentUrl });
+      chrome.tabs.update(tabId, { url: currentUrl });
       return;
     }
 
     const result = await response.json();
     const { prediction, severity, confidence } = result;
 
-    checkedUrlsPerTab[details.tabId] = currentUrl;
+    checkedUrlsPerTab[tabId] = currentUrl;
 
     if (prediction.toLowerCase() === "phishing" && severity.toLowerCase() !== "benign") {
-      chrome.tabs.update(details.tabId, {
+      chrome.tabs.update(tabId, {
         url: chrome.runtime.getURL(
-          `warning.html?url=${encodeURIComponent(currentUrl)}&tabId=${details.tabId}&severity=${severity}&confidence=${confidence.toFixed(2)}`
+          `warning.html?url=${encodeURIComponent(currentUrl)}&tabId=${tabId}&severity=${severity}&confidence=${confidence.toFixed(2)}`
         )
       });
     } else {
-      chrome.tabs.update(details.tabId, { url: currentUrl });
+      chrome.tabs.update(tabId, { url: currentUrl });
     }
   } catch (err) {
     console.warn("PhishGuard API unavailable, allowing:", currentUrl, "Error:", err);
-    chrome.tabs.update(details.tabId, { url: currentUrl });
+    chrome.tabs.update(tabId, { url: currentUrl });
   }
+}
+
+// Listen before navigation (typed URLs)
+chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+  checkAndHandleNavigation(details.tabId, details.frameId, details.url);
+});
+
+// Listen after navigation is committed (redirects, external links)
+chrome.webNavigation.onCommitted.addListener((details) => {
+  checkAndHandleNavigation(details.tabId, details.frameId, details.url);
 });
 
 // Handle "Allow Anyway"
